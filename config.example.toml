@@ -1,0 +1,36 @@
+[bot]
+# .toml = split fields (see characters/example.toml); .json/.png = SillyTavern card; .txt = one plain prompt
+character_file = "characters/example.toml"
+character_name = "Tasque"
+trigger_names = ["tasque"]
+conversation_history_limit = 50   # messages to/from the character (mentions, name calls, replies to it, its own)
+recent_history_limit = 10         # plus the latest channel messages, whatever they are
+history_scan_limit = 400          # how far back to look for conversation messages
+respond_to_bots = false
+
+[model]
+id = "deepseek/deepseek-v4.1-flash"
+temperature = 0.9
+max_tokens = 400
+reasoning = false
+
+[messages]
+max_messages_per_reply = 6
+drop_trailing_periods = false
+# Drops any of her messages about going to bed, sleeping, logging off or "it's 2am", and hides old ones from her memory.
+filter_bedtime_talk = true
+typing_seconds_per_char = 0.02
+min_typing_seconds = 0.3
+max_typing_seconds = 1.5
+
+[followup]
+# Lets her answer messages that don't @ or name her, when a cheap check says they're meant for her.
+# Only runs if she spoke in the channel within window_minutes AND within the last window_messages messages.
+enabled = true
+window_messages = 16
+window_minutes = 10
+# TypeSafe's Jev decision model scores how likely the message is meant for her (0..1).
+# Set judge_model = "" to use the main model's YES/NO check instead (also the automatic fallback if Jev fails).
+judge_model = "typesafe/jev-1.13"
+# Lower = chattier, higher = only obvious follow-ups.
+reply_threshold = 0.5
