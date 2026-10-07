@@ -1,6 +1,9 @@
 # Tasque
 
-A Discord bot that talks as a character, using DeepSeek through OpenRouter. It replies when @mentioned, replied to, or called by name, and sends its answer as several short messages, the way a person would.
+A Discord bot that talks as a character, using a similar customization, using OpenRouter API. 
+Replies when @mentioned, replied to, or called by name, and sends its answer as several short messages (split into realistic messages).
+
+**Tested with DeepSeek V4.1 Flash**
 
 ## Setup
 
@@ -9,7 +12,7 @@ A Discord bot that talks as a character, using DeepSeek through OpenRouter. It r
 3. Copy `config.example.toml` to `config.toml` and `characters/example.toml` to your own file (e.g. `characters/mychar.toml`), then point `character_file`, `character_name` and `trigger_names` in `config.toml` at it. You can also point `character_file` at a SillyTavern `.json`/`.png` card. Your `config.toml` and characters are gitignored, so they stay local.
 4. Double-click **`Start TASQUE.bat`**. The first launch sets up the Python environment; later launches start right away. Close the window to stop it.
 
-To run it silently in the background at every login, use **`Enable TASQUE Autostart.bat`** (and **`Disable TASQUE Autostart.bat`** to undo).
+To run it silently in the background at every pc startup, use **`Enable TASQUE Autostart.bat`** (and **`Disable TASQUE Autostart.bat`** to undo).
 
 Manual equivalent:
 
@@ -30,4 +33,4 @@ Right after the character speaks, it can also answer messages that don't mention
 
 ## Tuning
 
-Everything lives in `config.toml`: trigger names, history length, model, temperature, max messages per reply, typing speed, and `drop_trailing_periods` for the lowercase-no-period texting feel.
+Everything is in `config.toml`: trigger names, history length, model, temperature, max messages per reply, typing speed, and `drop_trailing_periods` for the lowercase-no-period texting feel.
