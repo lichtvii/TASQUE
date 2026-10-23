@@ -22,16 +22,16 @@ from tasque.openrouter import OpenRouterClient, OpenRouterError
 from tasque.prompt import build_prompt, clean_reply
 from tasque.settings import Settings
 
-log = logging.getLogger("tasque")
-
 SAFE_MENTIONS = discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=False)
 FOLLOWUP_JUDGE_CONTEXT_BEFORE_HER_MESSAGE = 4
 REPLY_ATTEMPTS = 2
+# Longer than a bot's pause between the messages of one reply, so a whole reply is judged as one turn.
+BOT_TURN_SETTLE_SECONDS = 3.0
 
 
 class CharacterBot(discord.Client):
     def __init__(self, settings: Settings, character: Character, llm: OpenRouterClient,
-                 memory_cutoffs: MemoryCutoffs):
+                 memory_cutoffs: MemoryCutoffs, tasque_bot_ids: set[int]):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
@@ -39,10 +39,15 @@ class CharacterBot(discord.Client):
         self.character = character
         self.llm = llm
         self.memory_cutoffs = memory_cutoffs
+        self.tasque_bot_ids = tasque_bot_ids
+        self.log = logging.getLogger(f"tasque.{settings.bot_id}")
         self.channel_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.last_spoke_at: dict[int, datetime] = {}
         self.judged_follow_up_ids: set[int] = set()
         self.newest_waiting_ids: dict[int, int] = {}
+        self.replies_to_bots_since_human: defaultdict[int, int] = defaultdict(int)
+        self.newest_bot_turn_ids: dict[int, int] = {}
+        self.bot_turn_addressed_channels: set[int] = set()
         alternation = "|".join(re.escape(name) for name in settings.trigger_names)
         self.name_trigger = re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE)
         self.tree = app_commands.CommandTree(self)
@@ -51,7 +56,7 @@ class CharacterBot(discord.Client):
     async def setup_hook(self) -> None:
         await self.llm.open()
         synced_commands = await self.tree.sync()
-        log.info("Synced slash commands: %s", ", ".join(f"/{command.name}" for command in synced_commands))
+        self.log.info("Synced slash commands: %s", ", ".join(f"/{command.name}" for command in synced_commands))
 
     def _register_commands(self) -> None:
         character_name = self.character.name
@@ -63,7 +68,7 @@ class CharacterBot(discord.Client):
             # The cutoff is the announcement itself, so she doesn't "remember" being lobotomised either.
             announcement = await interaction.original_response()
             self.memory_cutoffs.set(interaction.channel_id, announcement.id)
-            log.info("%s wiped memory in channel %s", interaction.user, interaction.channel_id)
+            self.log.info("%s wiped memory in channel %s", interaction.user, interaction.channel_id)
 
         @self.tree.command(name="say", description=f"Make {character_name} say exactly this")
         @app_commands.describe(text=f"What {character_name} should say")
@@ -77,21 +82,24 @@ class CharacterBot(discord.Client):
                 await interaction.response.send_message("I can't post in this channel.", ephemeral=True)
                 return
             await interaction.response.send_message("Sent.", ephemeral=True)
-            log.info("%s used /say in channel %s", interaction.user, interaction.channel_id)
+            self.log.info("%s used /say in channel %s", interaction.user, interaction.channel_id)
 
     async def close(self) -> None:
         await self.llm.close()
         await super().close()
 
     async def on_ready(self) -> None:
-        log.info("Logged in as %s, playing %s", self.user, self.character.name)
+        self.tasque_bot_ids.add(self.user.id)
+        self.log.info("Logged in as %s, playing %s", self.user, self.character.name)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.id == self.user.id:
             self.last_spoke_at[message.channel.id] = message.created_at
             return
-        if message.author.bot and not self.settings.respond_to_bots:
+        if message.author.bot:
+            await self._on_bot_message(message)
             return
+        self.replies_to_bots_since_human.pop(message.channel.id, None)
 
         addressed = self._is_addressed(message)
         if not addressed and not self._spoke_recently(message):
@@ -106,16 +114,54 @@ class CharacterBot(discord.Client):
         async with channel_lock:
             # A newer message queued behind this one will see it as context, so one reply covers both.
             if addressed and self.newest_waiting_ids.get(message.channel.id) != message.id:
-                log.info("Skipping superseded message from %s: %.80r", message.author.display_name,
-                         message.clean_content)
+                self.log.info("Skipping superseded message from %s: %.80r", message.author.display_name,
+                              message.clean_content)
                 return
             try:
                 if addressed or await self._judge_follow_up(message):
                     await self._respond(message)
             except OpenRouterError:
-                log.exception("OpenRouter request failed")
+                self.log.exception("OpenRouter request failed")
             except discord.HTTPException:
-                log.exception("Discord rejected a message")
+                self.log.exception("Discord rejected a message")
+
+    async def _on_bot_message(self, message: discord.Message) -> None:
+        channel_id = message.channel.id
+        if message.author.id not in self.tasque_bot_ids and not self.settings.respond_to_bots:
+            return
+        if not self._may_answer_bots(channel_id):
+            return
+        if self._is_addressed(message):
+            self.bot_turn_addressed_channels.add(channel_id)
+        self.newest_bot_turn_ids[channel_id] = message.id
+        await asyncio.sleep(BOT_TURN_SETTLE_SECONDS)
+        if self.newest_bot_turn_ids.get(channel_id) != message.id:
+            return
+        del self.newest_bot_turn_ids[channel_id]
+        addressed = channel_id in self.bot_turn_addressed_channels
+        self.bot_turn_addressed_channels.discard(channel_id)
+        if not addressed and not self._spoke_recently(message):
+            return
+
+        channel_lock = self.channel_locks[channel_id]
+        if channel_lock.locked():
+            return
+        async with channel_lock:
+            try:
+                # Bots always go through the judge: being named by another bot isn't a reason to answer by itself.
+                if not await self._judge_follow_up(message, require_own_recent_message=not addressed):
+                    return
+                if not self._may_answer_bots(channel_id):
+                    return
+                self.replies_to_bots_since_human[channel_id] += 1
+                await self._respond(message)
+            except OpenRouterError:
+                self.log.exception("OpenRouter request failed")
+            except discord.HTTPException:
+                self.log.exception("Discord rejected a message")
+
+    def _may_answer_bots(self, channel_id: int) -> bool:
+        return self.replies_to_bots_since_human[channel_id] < self.settings.bot_reply_limit
 
     def _spoke_recently(self, message: discord.Message) -> bool:
         if not self.settings.followup_enabled:
@@ -124,7 +170,7 @@ class CharacterBot(discord.Client):
         return last_spoke_at is not None and (
             message.created_at - last_spoke_at <= timedelta(minutes=self.settings.followup_window_minutes))
 
-    async def _judge_follow_up(self, message: discord.Message) -> bool:
+    async def _judge_follow_up(self, message: discord.Message, require_own_recent_message: bool = True) -> bool:
         memory_cutoff_id = self.memory_cutoffs.get(message.channel.id)
         recent_newest_first = []
         judge_context_limit = self.settings.followup_window_messages + FOLLOWUP_JUDGE_CONTEXT_BEFORE_HER_MESSAGE
@@ -133,9 +179,7 @@ class CharacterBot(discord.Client):
                 break
             recent_newest_first.append(past)
 
-        own_message_positions = [position for position, past in enumerate(recent_newest_first)
-                                 if past.author.id == self.user.id]
-        if not own_message_positions or own_message_positions[0] >= self.settings.followup_window_messages:
+        if require_own_recent_message and not self._spoke_last(recent_newest_first, message):
             return False
 
         transcript = list(reversed(recent_newest_first)) + [message]
@@ -143,9 +187,19 @@ class CharacterBot(discord.Client):
         should_reply = verdict >= self.settings.followup_reply_threshold
         if should_reply:
             self.judged_follow_up_ids.add(message.id)
-        log.info("Follow-up judge said %s (%.2f) to %s: %.80r", "YES" if should_reply else "NO", verdict,
+        self.log.info("Follow-up judge said %s (%.2f) to %s: %.80r", "YES" if should_reply else "NO", verdict,
                  message.author.display_name, message.clean_content)
         return should_reply
+
+    def _spoke_last(self, recent_newest_first: list[discord.Message], message: discord.Message) -> bool:
+        """Whether she spoke within the follow-up window, and (for a human's message) more recently than the other
+        characters, so a follow-up to one of them isn't judged by all of them."""
+        for past in recent_newest_first[:self.settings.followup_window_messages]:
+            if past.author.id == self.user.id:
+                return True
+            if past.author.id in self.tasque_bot_ids and not message.author.bot:
+                return False
+        return False
 
     async def _decide_follow_up(self, transcript: list[discord.Message]) -> float:
         judge_model = self.settings.followup_judge_model
@@ -154,7 +208,7 @@ class CharacterBot(discord.Client):
             try:
                 return reply_probability(await self.llm.decide(judge_model, state, questions))
             except (OpenRouterError, aiohttp.ClientError, asyncio.TimeoutError, KeyError, TypeError, ValueError):
-                log.warning("%s judge failed, falling back to the main model", judge_model, exc_info=True)
+                self.log.warning("%s judge failed, falling back to the main model", judge_model, exc_info=True)
         raw_verdict = await self.llm.complete(build_judge_prompt(self.character.name, transcript, self.user),
                                               temperature=0, max_tokens=5)
         return 1.0 if parse_judge_verdict(raw_verdict) else 0.0
@@ -191,7 +245,7 @@ class CharacterBot(discord.Client):
                 chunks = self._reply_chunks(raw_reply, participant_names)
                 if chunks:
                     break
-                log.warning("Model returned nothing usable: %r", raw_reply)
+                self.log.warning("Model returned nothing usable: %r", raw_reply)
             else:
                 return
 
@@ -214,7 +268,7 @@ class CharacterBot(discord.Client):
             return chunks
         dropped = [chunk for chunk in chunks if is_bedtime_talk(chunk)]
         if dropped:
-            log.info("Dropped bedtime talk: %r", dropped)
+            self.log.info("Dropped bedtime talk: %r", dropped)
         return [chunk for chunk in chunks if not is_bedtime_talk(chunk)]
 
     async def _link_server_members(self, reply: str, guild: discord.Guild | None) -> str:
@@ -226,11 +280,11 @@ class CharacterBot(discord.Client):
             try:
                 search_results = await self.http.request(search_route, params={"query": typed_name, "limit": 10})
             except discord.HTTPException:
-                log.warning("Member search failed for @%s", typed_name)
+                self.log.warning("Member search failed for @%s", typed_name)
                 continue
             member_id = unique_member_id_from_search(search_results, typed_name)
             if member_id is None:
-                log.info("No unique member for @%s, leaving it as text", typed_name)
+                self.log.info("No unique member for @%s, leaving it as text", typed_name)
                 continue
             reply = link_mentions(reply, {typed_name.lower(): member_id})
         return reply

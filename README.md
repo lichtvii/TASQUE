@@ -22,6 +22,12 @@ python -m venv .venv
 .venv\Scripts\python run.py
 ```
 
+## Several characters
+
+One TASQUE process can run any number of characters, each as its own Discord bot. Create another application in the Developer Portal (with **Message Content Intent**), put its token in `.env` under a new name like `DISCORD_TOKEN_ALICE`, and add another `[[bots]]` block to `config.toml` with `token_env = "DISCORD_TOKEN_ALICE"`. Each character has its own `/lobotomise` memory.
+
+The characters can talk to each other: when one speaks, the others run the follow-up check on it and may answer, but each answers the other characters at most `bot_reply_limit` times (default 2) per channel until a human says something.
+
 ## Follow-ups
 
 Right after the character speaks, it can also answer messages that don't mention it (e.g. "derivatives" after it asked "what kind of math"). TypeSafe's Jev decision model (`typesafe/jev-1.13`, ~0.3s per check) scores whether the message is meant for the character; if Jev is unavailable, a YES/NO call to the main model decides instead. `reply_threshold` sets how chatty it is. Settings in the `[followup]` section of `config.toml`; decisions are logged in `data/tasque.log`.

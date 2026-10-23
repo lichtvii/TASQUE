@@ -1,13 +1,3 @@
-[bot]
-# .toml = split fields (see characters/example.toml); .json/.png = SillyTavern card; .txt = one plain prompt
-character_file = "characters/example.toml"
-character_name = "Tasque"
-trigger_names = ["tasque"]
-conversation_history_limit = 50   # messages to/from the character (mentions, name calls, replies to it, its own)
-recent_history_limit = 10         # plus the latest channel messages, whatever they are
-history_scan_limit = 400          # how far back to look for conversation messages
-respond_to_bots = false
-
 [model]
 id = "deepseek/deepseek-v4.1-flash"
 temperature = 0.9
@@ -34,3 +24,30 @@ window_minutes = 10
 judge_model = "typesafe/jev-1.13"
 # Lower = chattier, higher = only obvious follow-ups.
 reply_threshold = 0.5
+
+# One [[bots]] block per character; all of them run in the same TASQUE process.
+# [model], [messages] and [followup] above are shared; a bot can override any of them with its own
+# [bots.model] / [bots.messages] / [bots.followup] table right below its [[bots]] block.
+[[bots]]
+# .toml = split fields (see characters/example.toml); .json/.png = SillyTavern card; .txt = one plain prompt
+character_file = "characters/example.toml"
+character_name = "Tasque"
+trigger_names = ["tasque"]
+token_env = "DISCORD_TOKEN"       # which .env entry holds this bot's token
+conversation_history_limit = 50   # messages to/from the character (mentions, name calls, replies to it, its own)
+recent_history_limit = 10         # plus the latest channel messages, whatever they are
+history_scan_limit = 400          # how far back to look for conversation messages
+# Answers to the other characters here (only when the follow-up judge says yes), per channel,
+# before a human has to say something again. 0 = never answer them.
+bot_reply_limit = 2
+respond_to_bots = false           # also answer bots that aren't TASQUE characters (same limit applies)
+
+# A second character: its own Discord application, with its token in .env as DISCORD_TOKEN_OTHER.
+# [[bots]]
+# character_file = "characters/other.toml"
+# character_name = "Other"
+# trigger_names = ["other"]
+# token_env = "DISCORD_TOKEN_OTHER"
+#
+# [bots.model]
+# temperature = 1.0

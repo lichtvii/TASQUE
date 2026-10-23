@@ -229,6 +229,7 @@ def test_queued_pings_collapse_into_one_reply_to_the_newest():
 
     bot = SimpleNamespace(user=SimpleNamespace(id=1), settings=SimpleNamespace(respond_to_bots=False),
                           channel_locks=defaultdict(asyncio.Lock), newest_waiting_ids={},
+                          replies_to_bots_since_human=defaultdict(int), log=SimpleNamespace(info=print),
                           _is_addressed=lambda message: True, _respond=respond)
 
     def ping(message_id):
@@ -282,3 +283,140 @@ def test_prompt_hides_her_old_bedtime_messages():
     history = [message(1, "Nell", "it's 2am"), message(1, "Nell", "curry obviously"), message(2, "Bob", "nell hi")]
     prompt = build_prompt(Character("Nell", "sys"), history, SimpleNamespace(id=1), "Bob", hide_own_bedtime_talk=True)
     assert [turn["content"] for turn in prompt[1:]] == ["curry obviously", "Bob: nell hi"]
+
+
+def test_settings_load_every_bot_with_shared_sections_and_overrides(tmp_path, monkeypatch):
+    from tasque.settings import load_settings
+    monkeypatch.setenv("OPENROUTER_API_KEY", "key")
+    monkeypatch.setenv("DISCORD_TOKEN", "aoko-token")
+    monkeypatch.delenv("DISCORD_TOKEN_ALICE", raising=False)
+    (tmp_path / "config.toml").write_text('''
+[model]
+id = "shared-model"
+temperature = 0.9
+[messages]
+max_messages_per_reply = 4
+
+[[bots]]
+character_file = "characters/aoko.toml"
+character_name = "Aoko"
+trigger_names = ["aoko"]
+
+[[bots]]
+character_file = "characters/alice.toml"
+character_name = "Alice Kuonji"
+trigger_names = ["alice"]
+token_env = "DISCORD_TOKEN_ALICE"
+bot_reply_limit = 1
+[bots.model]
+temperature = 0.7
+''', encoding="utf-8")
+
+    aoko, alice = load_settings(tmp_path)
+    assert (aoko.bot_id, aoko.discord_token, aoko.temperature, aoko.bot_reply_limit) == ("aoko", "aoko-token", 0.9, 2)
+    assert (alice.bot_id, alice.discord_token, alice.temperature, alice.model_id) == (
+        "alice_kuonji", "", 0.7, "shared-model")
+    assert alice.bot_reply_limit == 1 and alice.max_messages_per_reply == 4
+
+
+def test_single_bot_table_still_loads(tmp_path, monkeypatch):
+    from tasque.settings import load_settings
+    monkeypatch.setenv("OPENROUTER_API_KEY", "key")
+    monkeypatch.setenv("DISCORD_TOKEN", "token")
+    (tmp_path / "config.toml").write_text('''
+[bot]
+character_file = "characters/aoko.toml"
+character_name = "Aoko"
+trigger_names = ["aoko"]
+[model]
+id = "m"
+[messages]
+''', encoding="utf-8")
+    [aoko] = load_settings(tmp_path)
+    assert aoko.discord_token == "token" and aoko.bot_reply_limit == 2
+
+
+def _bot_chat_harness(bot_reply_limit=2):
+    import asyncio
+    from collections import defaultdict
+    from types import SimpleNamespace
+    from tasque.bot import CharacterBot
+
+    answered = []
+
+    async def respond(message):
+        answered.append(message.id)
+
+    async def judge_yes(message, require_own_recent_message=True):
+        return True
+
+    bot = SimpleNamespace(user=SimpleNamespace(id=1), tasque_bot_ids={1, 9}, log=SimpleNamespace(info=print),
+                          settings=SimpleNamespace(respond_to_bots=False, bot_reply_limit=bot_reply_limit),
+                          channel_locks=defaultdict(asyncio.Lock), newest_waiting_ids={},
+                          replies_to_bots_since_human=defaultdict(int), newest_bot_turn_ids={},
+                          bot_turn_addressed_channels=set(), _is_addressed=lambda message: True,
+                          _spoke_recently=lambda message: True, _judge_follow_up=judge_yes, _respond=respond)
+    bot._may_answer_bots = lambda channel_id: CharacterBot._may_answer_bots(bot, channel_id)
+    bot._on_bot_message = lambda message: CharacterBot._on_bot_message(bot, message)
+
+    def post(message_id, author_id, is_bot):
+        message = SimpleNamespace(id=message_id, channel=SimpleNamespace(id=7), clean_content="hey",
+                                  author=SimpleNamespace(id=author_id, bot=is_bot, display_name="x"))
+        return CharacterBot.on_message(bot, message)
+
+    return bot, answered, post
+
+
+def test_other_character_gets_two_answers_until_a_human_speaks(monkeypatch):
+    import asyncio
+    import tasque.bot
+    monkeypatch.setattr(tasque.bot, "BOT_TURN_SETTLE_SECONDS", 0)
+    _bot, answered, post = _bot_chat_harness()
+
+    async def chat():
+        for message_id in (1, 2, 3):
+            await post(message_id, author_id=9, is_bot=True)
+        await post(4, author_id=50, is_bot=False)
+        await post(5, author_id=9, is_bot=True)
+
+    asyncio.run(chat())
+    assert answered == [1, 2, 4, 5]
+
+
+def test_unknown_bots_are_ignored_unless_enabled(monkeypatch):
+    import asyncio
+    import tasque.bot
+    monkeypatch.setattr(tasque.bot, "BOT_TURN_SETTLE_SECONDS", 0)
+    _bot, answered, post = _bot_chat_harness()
+    asyncio.run(post(1, author_id=77, is_bot=True))
+    assert answered == []
+
+
+def test_one_answer_per_burst_from_the_other_character(monkeypatch):
+    import asyncio
+    import tasque.bot
+    monkeypatch.setattr(tasque.bot, "BOT_TURN_SETTLE_SECONDS", 0.05)
+    bot, answered, post = _bot_chat_harness()
+
+    async def burst():
+        await asyncio.gather(post(1, 9, True), post(2, 9, True), post(3, 9, True))
+
+    asyncio.run(burst())
+    assert answered == [3] and bot.replies_to_bots_since_human[7] == 1
+
+
+def test_only_the_character_who_spoke_last_judges_a_human_follow_up():
+    from types import SimpleNamespace
+    from tasque.bot import CharacterBot
+
+    def message(author_id, is_bot):
+        return SimpleNamespace(author=SimpleNamespace(id=author_id, bot=is_bot))
+
+    aoko = SimpleNamespace(user=SimpleNamespace(id=1), tasque_bot_ids={1, 9},
+                           settings=SimpleNamespace(followup_window_messages=16))
+    human, alice = message(50, False), message(9, True)
+    alice_spoke_after_aoko = [message(9, True), message(50, False), message(1, True)]
+    aoko_spoke_last = [message(1, True), message(9, True)]
+    assert not CharacterBot._spoke_last(aoko, alice_spoke_after_aoko, human)
+    assert CharacterBot._spoke_last(aoko, aoko_spoke_last, human)
+    assert CharacterBot._spoke_last(aoko, alice_spoke_after_aoko, alice)

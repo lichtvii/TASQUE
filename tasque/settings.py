@@ -1,4 +1,5 @@
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,8 @@ from dotenv import load_dotenv
 
 @dataclass
 class Settings:
+    bot_id: str
+    discord_token_env: str
     discord_token: str
     openrouter_api_key: str
     character_file: Path
@@ -17,6 +20,7 @@ class Settings:
     recent_history_limit: int
     history_scan_limit: int
     respond_to_bots: bool
+    bot_reply_limit: int
     model_id: str
     temperature: float
     max_tokens: int
@@ -34,18 +38,28 @@ class Settings:
     followup_reply_threshold: float
 
 
-def load_settings(project_root: Path) -> Settings:
+def load_settings(project_root: Path) -> list[Settings]:
     load_dotenv(project_root / ".env")
     config_path = project_root / "config.toml"
     if not config_path.exists():
         config_path = project_root / "config.example.toml"
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    bot, model, messages = config["bot"], config["model"], config["messages"]
-    followup = config.get("followup", {})
+    openrouter_api_key = _required_env("OPENROUTER_API_KEY")
+    bot_tables = config["bots"] if "bots" in config else [config["bot"]]
+    return [_bot_settings(project_root, config, bot, openrouter_api_key) for bot in bot_tables]
+
+
+def _bot_settings(project_root: Path, config: dict, bot: dict, openrouter_api_key: str) -> Settings:
+    model = {**config["model"], **bot.get("model", {})}
+    messages = {**config["messages"], **bot.get("messages", {})}
+    followup = {**config.get("followup", {}), **bot.get("followup", {})}
+    discord_token_env = bot.get("token_env", "DISCORD_TOKEN")
 
     return Settings(
-        discord_token=_required_env("DISCORD_TOKEN"),
-        openrouter_api_key=_required_env("OPENROUTER_API_KEY"),
+        bot_id=re.sub(r"[^a-z0-9]+", "_", bot["character_name"].lower()).strip("_"),
+        discord_token_env=discord_token_env,
+        discord_token=os.getenv(discord_token_env, "").strip(),
+        openrouter_api_key=openrouter_api_key,
         character_file=project_root / bot["character_file"],
         character_name=bot["character_name"],
         trigger_names=bot["trigger_names"],
@@ -53,6 +67,7 @@ def load_settings(project_root: Path) -> Settings:
         recent_history_limit=bot.get("recent_history_limit", 10),
         history_scan_limit=bot.get("history_scan_limit", 400),
         respond_to_bots=bot.get("respond_to_bots", False),
+        bot_reply_limit=bot.get("bot_reply_limit", 2),
         model_id=model["id"],
         temperature=model.get("temperature", 0.9),
         max_tokens=model.get("max_tokens", 400),

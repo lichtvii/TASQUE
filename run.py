@@ -1,7 +1,7 @@
+import asyncio
 import logging
 import socket
 import sys
-import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -12,7 +12,7 @@ from tasque.bot import CharacterBot
 from tasque.character import load_character
 from tasque.memory_cutoffs import MemoryCutoffs
 from tasque.openrouter import OpenRouterClient
-from tasque.settings import load_settings
+from tasque.settings import Settings, load_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -39,9 +39,29 @@ def main() -> None:
 
 
 def run_until_stopped() -> None:
-    settings = load_settings(PROJECT_ROOT)
-    character = load_character(settings.character_file, settings.character_name)
-    memory_cutoffs = MemoryCutoffs(DATA_DIR / "memory_cutoffs.json")
+    all_settings = load_settings(PROJECT_ROOT)
+    try:
+        asyncio.run(run_all_bots(all_settings))
+    except KeyboardInterrupt:
+        pass
+
+
+async def run_all_bots(all_settings: list[Settings]) -> None:
+    tasque_bot_ids: set[int] = set()
+    await asyncio.gather(*(keep_bot_connected(settings, tasque_bot_ids) for settings in all_settings))
+
+
+async def keep_bot_connected(settings: Settings, tasque_bot_ids: set[int]) -> None:
+    bot_log = logging.getLogger(f"tasque.{settings.bot_id}")
+    if not settings.discord_token:
+        bot_log.error("Missing %s in .env, not starting %s", settings.discord_token_env, settings.character_name)
+        return
+    try:
+        character = load_character(settings.character_file, settings.character_name)
+    except (OSError, ValueError, KeyError):
+        bot_log.exception("Can't load %s, not starting %s", settings.character_file, settings.character_name)
+        return
+    memory_cutoffs = MemoryCutoffs(DATA_DIR / f"memory_cutoffs_{settings.bot_id}.json")
 
     # At login the network is often not up yet; a failed first connection must not end the background process.
     while True:
@@ -52,13 +72,18 @@ def run_until_stopped() -> None:
             max_tokens=settings.max_tokens,
             reasoning_enabled=settings.reasoning_enabled,
         )
-        bot = CharacterBot(settings, character, llm, memory_cutoffs)
+        bot = CharacterBot(settings, character, llm, memory_cutoffs, tasque_bot_ids)
         try:
-            bot.run(settings.discord_token, log_handler=None)
+            async with bot:
+                await bot.start(settings.discord_token)
+            return
+        except discord.LoginFailure:
+            bot_log.error("Discord rejected %s (use the Bot tab's token, not the OAuth2 client secret), "
+                          "not starting %s", settings.discord_token_env, settings.character_name)
             return
         except (aiohttp.ClientConnectionError, OSError, discord.GatewayNotFound, discord.DiscordServerError):
-            log.warning("Can't reach Discord, retrying in %s seconds", CONNECT_RETRY_SECONDS)
-            time.sleep(CONNECT_RETRY_SECONDS)
+            bot_log.warning("Can't reach Discord, retrying in %s seconds", CONNECT_RETRY_SECONDS)
+            await asyncio.sleep(CONNECT_RETRY_SECONDS)
 
 
 def configure_logging() -> None:
