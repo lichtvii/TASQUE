@@ -420,3 +420,34 @@ def test_only_the_character_who_spoke_last_judges_a_human_follow_up():
     assert not CharacterBot._spoke_last(aoko, alice_spoke_after_aoko, human)
     assert CharacterBot._spoke_last(aoko, aoko_spoke_last, human)
     assert CharacterBot._spoke_last(aoko, alice_spoke_after_aoko, alice)
+
+
+def test_characters_called_together_answer_one_after_the_other():
+    import asyncio
+    from collections import defaultdict
+    from types import SimpleNamespace
+    from tasque.bot import CharacterBot
+
+    events = []
+    shared_channel_locks = defaultdict(asyncio.Lock)
+
+    def character(user_id, name):
+        async def respond(message):
+            events.append(f"{name} starts")
+            await asyncio.sleep(0.02)
+            events.append(f"{name} done")
+
+        return SimpleNamespace(user=SimpleNamespace(id=user_id), settings=SimpleNamespace(),
+                               channel_locks=shared_channel_locks, newest_waiting_ids={},
+                               replies_to_bots_since_human=defaultdict(int), log=SimpleNamespace(info=print),
+                               _is_addressed=lambda message: True, _respond=respond)
+
+    ping = SimpleNamespace(id=100, channel=SimpleNamespace(id=7), clean_content="aoko alice",
+                           author=SimpleNamespace(id=50, bot=False, display_name="Bob"))
+    aoko, alice = character(1, "aoko"), character(9, "alice")
+
+    async def both_called():
+        await asyncio.gather(CharacterBot.on_message(aoko, ping), CharacterBot.on_message(alice, ping))
+
+    asyncio.run(both_called())
+    assert events == ["aoko starts", "aoko done", "alice starts", "alice done"]

@@ -31,7 +31,8 @@ BOT_TURN_SETTLE_SECONDS = 3.0
 
 class CharacterBot(discord.Client):
     def __init__(self, settings: Settings, character: Character, llm: OpenRouterClient,
-                 memory_cutoffs: MemoryCutoffs, tasque_bot_ids: set[int]):
+                 memory_cutoffs: MemoryCutoffs, tasque_bot_ids: set[int],
+                 channel_locks: defaultdict[int, asyncio.Lock]):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
@@ -41,7 +42,8 @@ class CharacterBot(discord.Client):
         self.memory_cutoffs = memory_cutoffs
         self.tasque_bot_ids = tasque_bot_ids
         self.log = logging.getLogger(f"tasque.{settings.bot_id}")
-        self.channel_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # Shared by all characters, so when several are called at once they answer in turn and each sees the last.
+        self.channel_locks = channel_locks
         self.last_spoke_at: dict[int, datetime] = {}
         self.judged_follow_up_ids: set[int] = set()
         self.newest_waiting_ids: dict[int, int] = {}

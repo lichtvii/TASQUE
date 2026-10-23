@@ -2,6 +2,7 @@ import asyncio
 import logging
 import socket
 import sys
+from collections import defaultdict
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -48,10 +49,12 @@ def run_until_stopped() -> None:
 
 async def run_all_bots(all_settings: list[Settings]) -> None:
     tasque_bot_ids: set[int] = set()
-    await asyncio.gather(*(keep_bot_connected(settings, tasque_bot_ids) for settings in all_settings))
+    channel_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+    await asyncio.gather(*(keep_bot_connected(settings, tasque_bot_ids, channel_locks) for settings in all_settings))
 
 
-async def keep_bot_connected(settings: Settings, tasque_bot_ids: set[int]) -> None:
+async def keep_bot_connected(settings: Settings, tasque_bot_ids: set[int],
+                             channel_locks: defaultdict[int, asyncio.Lock]) -> None:
     bot_log = logging.getLogger(f"tasque.{settings.bot_id}")
     if not settings.discord_token:
         bot_log.error("Missing %s in .env, not starting %s", settings.discord_token_env, settings.character_name)
@@ -72,7 +75,7 @@ async def keep_bot_connected(settings: Settings, tasque_bot_ids: set[int]) -> No
             max_tokens=settings.max_tokens,
             reasoning_enabled=settings.reasoning_enabled,
         )
-        bot = CharacterBot(settings, character, llm, memory_cutoffs, tasque_bot_ids)
+        bot = CharacterBot(settings, character, llm, memory_cutoffs, tasque_bot_ids, channel_locks)
         try:
             async with bot:
                 await bot.start(settings.discord_token)
